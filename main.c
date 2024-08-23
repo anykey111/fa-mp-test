@@ -8,7 +8,7 @@
 #define PACKET_TYPE_ERROR 0xEE
 
 struct PacketHeader {
-    uint8_t type1;
+    uint8_t packet_type;
     uint8_t reserved;
     uint16_t len;
     uint32_t game_id;
@@ -40,9 +40,12 @@ signal_handler(int signo)
 }
 
 static void
-send_packet(struct mg_connection *c, char packet_type, struct mg_str resp)
+send_notification(struct mg_connection *c, char packet_type, struct mg_str resp)
 {
-    struct PacketHeader pkt = { .type1 = packet_type, .len = resp.len };
+    struct PacketHeader pkt = {
+        .packet_type = packet_type,
+        .len = resp.len,
+    };
     mg_send(c, &pkt, sizeof(pkt));
     if (resp.len) {
         mg_send(c, resp.buf, resp.len);
@@ -59,16 +62,18 @@ find_player_con(uint32_t player_id)
 static int
 handle_packet(struct mg_connection *c, struct ConState *state, struct PacketHeader *pkt)
 {
+    MG_DEBUG(("PKT %#X len=%u from=%u to=%u", pkt->packet_type, pkt->len, pkt->sender_id, pkt->receiver_id));
     if (!state->player_id) {
-        // first packet
-        // if (pkt->packet_type != PACKET_TYPE_AUTH_DATA) {
-        //     c->is_draining = 1;
-        //     return -1;
-        // }
-        if(find_player_con(pkt->sender_id)) {
+        // first packet must'be auth data
+        if (pkt->packet_type != PACKET_TYPE_AUTH_DATA) {
+            c->is_draining = 1;
+            MG_ERROR(("auth requied player_id=%u", pkt->sender_id));
+            return -1;
+        }
+        if (find_player_con(pkt->sender_id)) {
             c->is_closing = 1;
             MG_ERROR(("already connected player_id=%u", pkt->sender_id));
-            send_packet(c, PACKET_TYPE_ERROR, mg_str("already connected"));
+            send_notification(c, PACKET_TYPE_ERROR, mg_str("already connected"));
             return -1;
         }
         state->player_id = pkt->sender_id;
@@ -80,7 +85,7 @@ handle_packet(struct mg_connection *c, struct ConState *state, struct PacketHead
         MG_ERROR(("invalid sender_id=%u", pkt->sender_id));
         return -1;
     }
-    if (pkt->type1 == PACKET_TYPE_GAME_DATA) {
+    if (pkt->packet_type == PACKET_TYPE_GAME_DATA) {
         struct mg_connection *rcon = find_player_con(pkt->receiver_id);
         if(!rcon) {
             MG_ERROR(("remote player %d is disconnected", pkt->receiver_id));
@@ -101,13 +106,13 @@ proxy_fn(struct mg_connection *c, int ev, void *ev_data)
     } else if (ev == MG_EV_CLOSE) {
         vt_erase(&s_players, state->player_id);
     } else if (ev == MG_EV_POLL) {
-        if (c->is_listening || c->is_closing || c->is_draining) {
-            return;
-        }
-        if ((state->recv_time + 15000) < mg_millis()) {
-            MG_ERROR(("recv_time=%u expired"));
-            c->is_closing = 1;
-        }
+        // if (c->is_listening || c->is_closing || c->is_draining) {
+        //     return;
+        // }
+        // if ((state->recv_time + 15000) < mg_millis()) {
+        //     MG_ERROR(("recv_time=%u expired"));
+        //     c->is_closing = 1;
+        // }
     } else if (ev == MG_EV_READ) {
         state->recv_time = mg_millis();
         while (c->recv.len >= sizeof(struct PacketHeader)) {
@@ -136,8 +141,13 @@ usage(const char *prog)
 int
 main(int argc, char *argv[])
 {
+    mg_log_set(MG_LL_DEBUG);
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+    if (sizeof(struct PacketHeader) != 16) {
+        MG_ERROR(("sizeof PacketHeader != 16, check compiler options"));
+        exit(EXIT_FAILURE);
+    }
     for (int i = 1; i < argc; i++) {
         if (mg_casecmp("--port", argv[i]) == 0) {
             s_port = argv[++i];
@@ -147,7 +157,6 @@ main(int argc, char *argv[])
     }
     vt_init(&s_players);
     struct mg_mgr mgr;
-    mg_log_set(MG_LL_DEBUG);
     mg_mgr_init(&mgr);
     char url[100];
     mg_snprintf(url, sizeof(url), "tcp://0.0.0.0:%s", s_port);
