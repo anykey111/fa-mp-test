@@ -32,19 +32,18 @@ struct GPGNetCmd {
 
 struct GPGNetClient {
     struct PlayerInfo *player;
-    enum GameState game_state;
-};
-
-struct ProxyState {
 };
 
 struct PlayerInfo {
     u32 is_hosting;
+    u32 is_connected;
     u32 conbits;
     u32 id;
     u32 lobby_port;
     u32 proxy_port;
     const char *name;
+    enum GameState game_state;
+    struct mg_connection *proxy;
 };
 
 struct MPHeader {
@@ -60,11 +59,9 @@ struct MPHeader {
 
 static const char *s_port = "7237";
 
-#define FLAG_IS_CONNECTED
-
 static struct PlayerInfo s_players[] = {
-    { .is_hosting = 1, .id = 1, .lobby_port = 6123, .proxy_port = 7123, .name = "player1" },
-    { .is_hosting = 0, .id = 2, .lobby_port = 6124, .proxy_port = 7124, .name = "player2" }
+    { .is_hosting = 1, .id = 1, .lobby_port = 6001, .proxy_port = 7001, .name = "player1" },
+    { .is_hosting = 0, .id = 2, .lobby_port = 6002, .proxy_port = 7002, .name = "player2" }
 };
 
 static int s_signo;
@@ -119,52 +116,62 @@ send_tagged_u32(struct mg_connection *c, u32 u)
     send_u32(c, u);
 }
 
-// static struct mg_connection*
-// find_player_con(struct mg_mgr *mgr, u32 id)
-// {
-//     for (struct mg_connection *c = mgr->conns; c != NULL; c = c->next) {
-//         struct GPGNetClient *client = (struct GPGNetClient *)c->data;
-//         if (client->player && client->player->id == id)
-//             return c;
-//     }
-//     return NULL;
-// }
-
-// static void
-// proxy_fn(struct mg_connection *c, int ev, void *ev_data)
-// {
-//     struct ProxyState *proxy = (struct ProxyState *)c->data;
-//     if (ev == MG_EV_OPEN)
-//         c->is_hexdumping = 1;
-//     if (ev != MG_EV_READ)
-//         return;
-//     (void)ev_data;
-// }
+static void
+proxy_fn(struct mg_connection *c, int ev, void *ev_data)
+{
+    struct PlayerInfo *player = (struct PlayerInfo *)c->fn_data;
+    if (ev == MG_EV_OPEN) {
+        //c->is_hexdumping = 1;
+        MG_DEBUG(("%s proxy is ready", player->name));
+    }
+    if (ev != MG_EV_READ)
+        return;
+    uint16_t rem_port = mg_ntohs(c->rem.port);
+    MG_DEBUG(("recv from %u", rem_port));
+    if (rem_port < 7000) {
+        rem_port += 1000;
+    } else {
+        rem_port -= 1000;
+    }
+    c->rem.port = mg_htons(rem_port);
+    MG_DEBUG(("redirect %u to %u", mg_ntohs(c->loc.port), mg_ntohs(c->rem.port)));
+    mg_send(c, c->recv.buf, c->recv.len);
+    c->recv.len = 0;
+    (void)ev_data;
+}
 
 static int
-handle_command(struct mg_connection *c, struct GPGNetClient *client, struct GPGNetCmd *cmd)
+handle_command(struct mg_connection *c, struct PlayerInfo *player, struct GPGNetCmd *cmd)
 {
-    MG_DEBUG(("%.*s", cmd->name.len, cmd->name.buf));
+    char url[1000];
+    int n = 0;
+    for (u32 i = 0; i < cmd->num_params; ++i) {
+        struct GPGNetCmdParam *p = &cmd->params[i];
+        if (p->type) {
+            n += mg_snprintf(url, sizeof(url), " s:%.*s", p->str.len, p->str.buf);
+        } else {
+            n += mg_snprintf(url, sizeof(url), " u:%d", p->val);
+        }
+    }
+    MG_DEBUG(("%.*s %s", cmd->name.len, cmd->name.buf, url));
     if (mg_strcmp(cmd->name, mg_str("GameState")) == 0) {
-        struct mg_str state = cmd->params[0].str;
-        MG_DEBUG(("state=%.*s", state.len, state.buf));
-        char url[100];
-        if (mg_strcmp(state, mg_str("Idle")) == 0 && client->game_state != GAME_STATE_IDLE) {
-            client->game_state = GAME_STATE_IDLE;
+        if (mg_strcmp(cmd->params[0].str, mg_str("Idle")) == 0 && player->game_state != GAME_STATE_IDLE) {
+            player->game_state = GAME_STATE_IDLE;
             send_str(c, mg_str("CreateLobby"));
             send_u32(c, 5);
             send_tagged_u32(c, 0); // lobby init mode normal
-            send_tagged_u32(c, client->player->lobby_port);
-            send_tagged_str(c, mg_str(client->player->name));
-            send_tagged_u32(c, client->player->id);
-            send_tagged_u32(c, 1); // local offer
-            //mg_snprintf(url, sizeof(url), "udp://0.0.0.0:%u", client->player->proxy_port);
-            // if (!mg_listen(c->mgr, url)) {
-            //     MG_ERROR(("port binding failed, url=%s", url));
-            //     s_signo = SIGTERM;
-            // }
-        } else if (mg_strcmp(state, mg_str("Lobby")) == 0 && client->game_state != GAME_STATE_LOBBY) {
-            if (client->player->is_hosting) {
+            send_tagged_u32(c, player->lobby_port);
+            send_tagged_str(c, mg_str(player->name));
+            send_tagged_u32(c, player->id);
+            send_tagged_u32(c, 0); // local offer
+            mg_snprintf(url, sizeof(url), "udp://127.0.0.1:%u", player->proxy_port);
+            if (!(player->proxy = mg_listen(c->mgr, url, proxy_fn, player))) {
+                MG_ERROR(("port binding failed, url=%s", url));
+                s_signo = SIGTERM;
+            }
+        } else if (mg_strcmp(cmd->params[0].str, mg_str("Lobby")) == 0 && player->game_state != GAME_STATE_LOBBY) {
+            player->game_state = GAME_STATE_LOBBY;
+            if (player->is_hosting) {
                 send_str(c, mg_str("HostGame"));
                 send_u32(c, 1);
                 send_tagged_str(c, mg_str("monument_valley.v0001"));
@@ -172,12 +179,21 @@ handle_command(struct mg_connection *c, struct GPGNetClient *client, struct GPGN
                 struct PlayerInfo *host = &s_players[0];
                 send_str(c, mg_str("JoinGame"));
                 send_u32(c, 3);
-                mg_snprintf(url, sizeof(url), "127.0.0.1:%u", host->lobby_port);
+                mg_snprintf(url, sizeof(url), "127.0.0.1:%u", host->proxy_port);
                 send_tagged_str(c, mg_str(url));
                 send_tagged_str(c, mg_str(host->name));
                 send_tagged_u32(c, host->id);
+                MG_INFO(("JoinGame %s", url));
             }
         }
+    } else if (mg_strcmp(cmd->name, mg_str("Connected")) == 0) {
+        u32 id = 0;
+        mg_str_to_num(cmd->params[0].str, 10, &id, sizeof(id));
+        player->conbits |= 1 << id;
+    } else if (mg_strcmp(cmd->name, mg_str("Disconnected")) == 0) {
+        u32 id = 0;
+        mg_str_to_num(cmd->params[0].str, 10, &id, sizeof(id));
+        //player->conbits &= ~(1 << id);
     }
     return 0;
 }
@@ -188,12 +204,12 @@ gpgnet_fn(struct mg_connection *c, int ev, void *ev_data)
     struct GPGNetClient *client = (struct GPGNetClient *)c->data;
     struct PlayerInfo *player = client->player;
     if (ev == MG_EV_OPEN) {
-        c->is_hexdumping = 1;
+        //c->is_hexdumping = 1;
     } else if (ev == MG_EV_ACCEPT) {
         for (size_t i = 0; i < count_of(s_players); ++i) {
             struct PlayerInfo *player = &s_players[i];
-            if (!player->conbits) {
-                player->conbits |= 1 << i;
+            if (!player->is_connected) {
+                player->is_connected = 1;
                 client->player = player;
                 break;
             }
@@ -209,33 +225,37 @@ gpgnet_fn(struct mg_connection *c, int ev, void *ev_data)
         }
         for (size_t i = 0; i < count_of(s_players); ++i) {
             struct PlayerInfo *peer = &s_players[i];
-            if (player->id != peer->id && (player->conbits & (1 << i))) {
+            if (player->id != peer->id && (player->conbits & (1 << peer->id))) {
                 MG_DEBUG(("disconnect %s from %s", player->name, peer->name));
                 send_str(c, mg_str("DisconnectFromPeer"));
                 send_u32(c, 3);
                 char url[100];
-                mg_snprintf(url, sizeof(url), "127.0.0.1:%u", peer->lobby_port);
+                mg_snprintf(url, sizeof(url), "127.0.0.1:%u", peer->proxy_port);
                 send_tagged_str(c, mg_str(url));
                 send_tagged_str(c, mg_str(peer->name));
                 send_tagged_u32(c, peer->id);
-                player->conbits &= ~(1 << i);
                 break;
             }
         }
-        player->conbits = 0;
+        player->is_connected = 0;
+        player->game_state = GAME_STATE_NONE;
+        if (player->proxy)
+            player->proxy->is_closing = 1;
     } else if (ev == MG_EV_POLL && player) {
-        for (size_t i = 0; i < count_of(s_players); ++i) {
+        for (size_t i = 0; i < count_of(s_players) && player->is_hosting; ++i) {
             struct PlayerInfo *peer = &s_players[i];
-            if (player->id != peer->id && peer->conbits && !(player->conbits & (1 << i))) {
+            if (player->id == peer->id || player->game_state != GAME_STATE_LOBBY || peer->game_state != GAME_STATE_LOBBY)
+                continue;
+            if (!(player->conbits & (1 << peer->id))) {
                 MG_DEBUG(("connect %s to %s", player->name, peer->name));
                 send_str(c, mg_str("ConnectToPeer"));
                 send_u32(c, 3);
                 char url[100];
-                mg_snprintf(url, sizeof(url), "127.0.0.1:%u", peer->lobby_port);
+                mg_snprintf(url, sizeof(url), "127.0.0.1:%u", peer->proxy_port);
                 send_tagged_str(c, mg_str(url));
                 send_tagged_str(c, mg_str(peer->name));
                 send_tagged_u32(c, peer->id);
-                player->conbits |= 1 << i;
+                player->conbits |= 1 << peer->id;
                 break;
             }
         }
@@ -284,7 +304,7 @@ gpgnet_fn(struct mg_connection *c, int ev, void *ev_data)
                     ptr += len;
                 }
             }
-            if (handle_command(c, client, &cmd) < 0)
+            if (handle_command(c, player, &cmd) < 0)
                 return;
             mg_iobuf_del(&c->recv, 0, ptr - c->recv.buf);
         }
@@ -319,10 +339,10 @@ main(int argc, char *argv[])
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
     char url[100];
-    mg_snprintf(url, sizeof(url), "tcp://0.0.0.0:%s", s_port);
+    mg_snprintf(url, sizeof(url), "tcp://127.0.0.1:%s", s_port);
     mg_listen(&mgr, url, gpgnet_fn, NULL);
     while (s_signo == 0) {
-        mg_mgr_poll(&mgr, 1000);
+        mg_mgr_poll(&mgr, 25);
     }
     MG_INFO(("exit s_signo=%u", s_signo));
     mg_mgr_free(&mgr);
