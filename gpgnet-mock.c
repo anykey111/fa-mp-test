@@ -41,23 +41,33 @@ struct PlayerInfo {
     u32 id;
     u32 lobby_port;
     u32 proxy_port;
+    u16 next_serial;
     const char *name;
     enum GameState game_state;
     struct mg_connection *proxy;
 };
 
+#define MP_CNT 0 // Connect Type
+#define MP_ANS 1 // Answer Type
+#define MP_DAT 4 // Data Type
+#define MP_ACK 5 // Acknowledgement Type
+#define MP_KPA 6 // KeepAlive Type
+#define MP_GBY 7 // Goodbye Type
+#define MP_NAT 8 // NAT Type
+
 struct MPHeader {
-    uint8_t  mp_type;
-    uint16_t mask;
+    uint8_t  type;
+    uint32_t mask;
     uint16_t serial;
     uint16_t serial_ack;
-    uint16_t seqno;
-    uint16_t seqno_ack;
-    uint16_t length;
+    uint16_t seq;
+    uint16_t seq2;
+    uint16_t len;
     uint8_t data[0];
 } __attribute__((packed));
 
 static const char *s_port = "7237";
+static FILE *s_log;
 
 static struct PlayerInfo s_players[] = {
     { .is_hosting = 1, .id = 1, .lobby_port = 6001, .proxy_port = 7001, .name = "player1" },
@@ -117,21 +127,83 @@ send_tagged_u32(struct mg_connection *c, u32 u)
 }
 
 static void
+log_packet(u16 rem_port, struct MPHeader *h)
+{
+    if (!s_log)
+        return;
+    const char *mp_name =
+        h->type == MP_CNT ? "CNT" :
+        h->type == MP_ANS ? "ANS" :
+        h->type == MP_DAT ? "DAT" :
+        h->type == MP_ACK ? "ACK" :
+        h->type == MP_KPA ? "KPA" :
+        h->type == MP_GBY ? "GBY" : "UNK";
+    static char hex[128000];
+    memset(hex, 0, sizeof(hex));
+    MG_INFO(("%s: %u len\n", mp_name, h->len));
+    for (size_t i = 0, n = 0; i<h->len; ++i) {
+        n += mg_snprintf(hex + n, sizeof(hex) - n, "%02X", h->data[i]);
+    }
+    fprintf(s_log, "%u\t%s\t%u\t%u\t%u\t%u\tx'%s'\n", rem_port, mp_name, h->serial, h->serial_ack, h->seq, h->seq2, hex);
+}
+
+static void
 proxy_fn(struct mg_connection *c, int ev, void *ev_data)
 {
     struct PlayerInfo *player = (struct PlayerInfo *)c->fn_data;
     if (ev == MG_EV_OPEN) {
-        //c->is_hexdumping = 1;
+        c->is_hexdumping = 1;
         MG_DEBUG(("%s proxy is ready", player->name));
     }
     if (ev != MG_EV_READ)
         return;
     uint16_t rem_port = mg_ntohs(c->rem.port);
-    MG_DEBUG(("recv from %u", rem_port));
+    //MG_DEBUG(("recv from %u", rem_port));
+    struct MPHeader *h = (struct MPHeader *)c->recv.buf;
+    // struct PlayerInfo *peer = NULL;
+    // for (size_t i = 0; i < count_of(s_players); ++i) {
+    //     if (s_players[i].lobby_port == rem_port) {
+    //         peer = &s_players[i];
+    //         break;
+    //     }
+    // }
     if (rem_port < 7000) {
+        player->next_serial = h->serial;
+        // packet from the game
+        log_packet(rem_port, h);
+        // if (h->type == MP_ACK) {
+        //     //remove ack
+        //     return;
+        // }
+        // if (h->type == MP_DAT && peer) {
+        //     struct MPHeader ack = {
+        //         .type = MP_ACK,
+        //         .serial_ack = h->serial,
+        //         .serial = peer->next_serial++,
+        //         .seq = h->seq2,
+        //         .seq2 = h->seq,
+        //     };
+        //     fprintf(s_log, "%u\t%u\t%u\t%u\t%u\t%u\n", player->lobby_port, ack.serial, ack.serial_ack, ack.seq, ack.seq2);
+        //    // mg_send(c, &ack, sizeof(ack));
+        // }
+        // if (h->type == MP_KPA && peer) {
+        //     struct MPHeader ack = {
+        //         .type = MP_ACK,
+        //         .serial_ack = h->serial,
+        //         .serial = peer->next_serial++,
+        //         .seq = h->seq2,
+        //         .seq2 = h->seq,
+        //     };
+        //     fprintf(s_log, "%u\t%u\t%u\t%u\t%u\t%u\n", player->lobby_port, ack.serial, ack.serial_ack, ack.seq, ack.seq2);
+        //     //mg_send(c, &ack, sizeof(ack));
+        //     // skip kpa packet
+        //     //return;
+        // }
         rem_port += 1000;
     } else {
+        // packet from the proxy
         rem_port -= 1000;
+        log_packet(rem_port, h);
     }
     c->rem.port = mg_htons(rem_port);
     MG_DEBUG(("redirect %u to %u", mg_ntohs(c->loc.port), mg_ntohs(c->rem.port)));
@@ -326,7 +398,7 @@ usage(const char *prog)
 int
 main(int argc, char *argv[])
 {
-    mg_log_set(MG_LL_DEBUG);
+    mg_log_set(MG_LL_INFO);
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     for (int i = 1; i < argc; i++) {
@@ -339,6 +411,8 @@ main(int argc, char *argv[])
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
     char url[100];
+    s_log = fopen("log.csv", "w+");
+    fprintf(s_log, "port\tpacket\tser\tserack\tseq\tseq2\n");
     mg_snprintf(url, sizeof(url), "tcp://127.0.0.1:%s", s_port);
     mg_listen(&mgr, url, gpgnet_fn, NULL);
     while (s_signo == 0) {
