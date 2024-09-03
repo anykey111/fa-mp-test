@@ -34,20 +34,8 @@ struct GPGNetClient {
     struct PlayerInfo *player;
 };
 
-struct PlayerInfo {
-    u32 is_hosting;
-    u32 is_connected;
-    u32 conbits;
-    u32 id;
-    u32 lobby_port;
-    u32 proxy_port;
-    u16 next_serial;
-    const char *name;
-    enum GameState game_state;
-    struct mg_connection *proxy;
-};
 
-#define MP_CNT 0 // Connect Type
+#define MP_CON 0 // Connect Type
 #define MP_ANS 1 // Answer Type
 #define MP_DAT 4 // Data Type
 #define MP_ACK 5 // Acknowledgement Type
@@ -58,14 +46,34 @@ struct PlayerInfo {
 struct MPHeader {
     uint8_t  type;
     uint32_t mask;
-    uint16_t serial;
-    uint16_t serial_ack;
+    uint16_t ser;
+    uint16_t irt;
     uint16_t seq;
-    uint16_t seq2;
+    uint16_t expected;
     uint16_t len;
     uint8_t data[0];
 } __attribute__((packed));
 
+struct MPRecentList {
+    size_t pos;
+    struct MPHeader items[100];
+};
+
+struct PlayerInfo {
+    u32 is_hosting;
+    u32 is_connected;
+    u32 conbits;
+    u32 id;
+    u32 lobby_port;
+    u32 proxy_port;
+    u16 next_ser;
+    const char *name;
+    enum GameState game_state;
+    struct mg_connection *proxy;
+    struct MPRecentList inbox;
+};
+
+static int s_fake_ack = 0;
 static const char *s_port = "7237";
 static FILE *s_log;
 
@@ -132,7 +140,7 @@ log_packet(u16 rem_port, struct MPHeader *h)
     if (!s_log)
         return;
     const char *mp_name =
-        h->type == MP_CNT ? "CNT" :
+        h->type == MP_CON ? "CON" :
         h->type == MP_ANS ? "ANS" :
         h->type == MP_DAT ? "DAT" :
         h->type == MP_ACK ? "ACK" :
@@ -140,11 +148,37 @@ log_packet(u16 rem_port, struct MPHeader *h)
         h->type == MP_GBY ? "GBY" : "UNK";
     static char hex[128000];
     memset(hex, 0, sizeof(hex));
-    MG_INFO(("%s: %u len\n", mp_name, h->len));
+    MG_DEBUG(("%s: %u len\n", mp_name, h->len));
     for (size_t i = 0, n = 0; i<h->len; ++i) {
         n += mg_snprintf(hex + n, sizeof(hex) - n, "%02X", h->data[i]);
     }
-    fprintf(s_log, "%u\t%s\t%u\t%u\t%u\t%u\tx'%s'\n", rem_port, mp_name, h->serial, h->serial_ack, h->seq, h->seq2, hex);
+    fprintf(s_log, "%u\t%s\t%u\t%u\t%u\t%u\tx'%s'\n", rem_port, mp_name, h->ser, h->irt, h->seq, h->expected, hex);
+}
+
+static void
+recent_add(struct MPRecentList *list, struct MPHeader *h)
+{
+    size_t i = (list->pos + 1) % count_of(list->items);
+    list->items[i] = *h;
+    list->pos = i;
+}
+
+static struct MPHeader *
+recent_lookup_dat(struct MPRecentList *list, u16 ser)
+{
+    for (size_t i = 0, limit = 0; i < count_of(list->items) && limit < 10; ++i) {
+        struct MPHeader *h = &list->items[i];
+        if (h->ser == ser && h->type == MP_DAT) {
+            if (h->irt) {
+                i = 0;
+                limit += 1;
+                ser = h->irt;
+                continue;
+            }
+            return h;
+        }
+    }
+    return NULL;
 }
 
 static void
@@ -152,58 +186,37 @@ proxy_fn(struct mg_connection *c, int ev, void *ev_data)
 {
     struct PlayerInfo *player = (struct PlayerInfo *)c->fn_data;
     if (ev == MG_EV_OPEN) {
-        c->is_hexdumping = 1;
+        //c->is_hexdumping = 1;
         MG_DEBUG(("%s proxy is ready", player->name));
     }
     if (ev != MG_EV_READ)
         return;
     uint16_t rem_port = mg_ntohs(c->rem.port);
-    //MG_DEBUG(("recv from %u", rem_port));
     struct MPHeader *h = (struct MPHeader *)c->recv.buf;
-    // struct PlayerInfo *peer = NULL;
-    // for (size_t i = 0; i < count_of(s_players); ++i) {
-    //     if (s_players[i].lobby_port == rem_port) {
-    //         peer = &s_players[i];
-    //         break;
-    //     }
-    // }
     if (rem_port < 7000) {
-        player->next_serial = h->serial;
+        if (h->ser > player->next_ser)
+            player->next_ser = h->ser;
         // packet from the game
         log_packet(rem_port, h);
-        // if (h->type == MP_ACK) {
-        //     //remove ack
-        //     return;
-        // }
-        // if (h->type == MP_DAT && peer) {
-        //     struct MPHeader ack = {
-        //         .type = MP_ACK,
-        //         .serial_ack = h->serial,
-        //         .serial = peer->next_serial++,
-        //         .seq = h->seq2,
-        //         .seq2 = h->seq,
-        //     };
-        //     fprintf(s_log, "%u\t%u\t%u\t%u\t%u\t%u\n", player->lobby_port, ack.serial, ack.serial_ack, ack.seq, ack.seq2);
-        //    // mg_send(c, &ack, sizeof(ack));
-        // }
-        // if (h->type == MP_KPA && peer) {
-        //     struct MPHeader ack = {
-        //         .type = MP_ACK,
-        //         .serial_ack = h->serial,
-        //         .serial = peer->next_serial++,
-        //         .seq = h->seq2,
-        //         .seq2 = h->seq,
-        //     };
-        //     fprintf(s_log, "%u\t%u\t%u\t%u\t%u\t%u\n", player->lobby_port, ack.serial, ack.serial_ack, ack.seq, ack.seq2);
-        //     //mg_send(c, &ack, sizeof(ack));
-        //     // skip kpa packet
-        //     //return;
-        // }
+        struct MPHeader *irt_dat = recent_lookup_dat(&player->inbox, h->irt);
+        if (s_fake_ack && h->type == MP_ACK && irt_dat)
+            return; // skip ACK only for DAT packets
+        if (s_fake_ack && h->type == MP_DAT && irt_dat) {
+            struct MPHeader ack = {
+                .type = MP_ACK,
+                .irt = h->ser,
+                .ser = player->next_ser,
+                .seq = h->expected,
+                .expected = h->seq + 1,
+            };
+            mg_send(c, &ack, sizeof(ack));
+        }
         rem_port += 1000;
     } else {
         // packet from the proxy
         rem_port -= 1000;
         log_packet(rem_port, h);
+        recent_add(&player->inbox, h);
     }
     c->rem.port = mg_htons(rem_port);
     MG_DEBUG(("redirect %u to %u", mg_ntohs(c->loc.port), mg_ntohs(c->rem.port)));
@@ -390,6 +403,7 @@ usage(const char *prog)
     fprintf(stderr,
         "%s usage:\n"
         "--help                           show help message\n"
+        "--fake-ack                       send fake MP_ACK for every MP_DAT\n"
         "--port arg                       set the GPGNet port\n",
         prog);
     exit(EXIT_FAILURE);
@@ -404,6 +418,8 @@ main(int argc, char *argv[])
     for (int i = 1; i < argc; i++) {
         if (mg_casecmp("--port", argv[i]) == 0) {
             s_port = argv[++i];
+        } else if (mg_casecmp("--fake-ack", argv[i]) == 0) {
+            s_fake_ack = 1;
         } else {
             usage(argv[0]);
         }
@@ -412,7 +428,7 @@ main(int argc, char *argv[])
     mg_mgr_init(&mgr);
     char url[100];
     s_log = fopen("log.csv", "w+");
-    fprintf(s_log, "port\tpacket\tser\tserack\tseq\tseq2\n");
+    fprintf(s_log, "port\ttype\tser\tirt\tseq\texpected\n");
     mg_snprintf(url, sizeof(url), "tcp://127.0.0.1:%s", s_port);
     mg_listen(&mgr, url, gpgnet_fn, NULL);
     while (s_signo == 0) {
