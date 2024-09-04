@@ -16,4 +16,4 @@ all: $(GPGNET)
 	$(GPGNET)
 
 test: $(GPGNET)
-	$(GPGNET)
+	$(GPGNET) --record log.csv

@@ -403,6 +403,8 @@ usage(const char *prog)
     fprintf(stderr,
         "%s usage:\n"
         "--help                           show help message\n"
+        "--debug                          enable verbose logging\n"
+        "--record filename                record all message into .csv file\n"
         "--fake-ack                       send fake MP_ACK for every MP_DAT\n"
         "--port arg                       set the GPGNet port\n",
         prog);
@@ -420,6 +422,17 @@ main(int argc, char *argv[])
             s_port = argv[++i];
         } else if (mg_casecmp("--fake-ack", argv[i]) == 0) {
             s_fake_ack = 1;
+        } else if (mg_casecmp("--debug", argv[i]) == 0) {
+            mg_log_set(MG_LL_DEBUG);
+        } else if (mg_casecmp("--record", argv[i]) == 0) {
+            const char *filename = argv[++i];
+            s_log = fopen(filename, "w+");
+            if (!s_log) {
+                perror(filename);
+                exit(EXIT_FAILURE);
+            }
+            MG_INFO(("start recording to %s", filename));
+            fprintf(s_log, "port\ttype\tser\tirt\tseq\texpected\n");
         } else {
             usage(argv[0]);
         }
@@ -427,8 +440,6 @@ main(int argc, char *argv[])
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
     char url[100];
-    s_log = fopen("log.csv", "w+");
-    fprintf(s_log, "port\ttype\tser\tirt\tseq\texpected\n");
     mg_snprintf(url, sizeof(url), "tcp://127.0.0.1:%s", s_port);
     mg_listen(&mgr, url, gpgnet_fn, NULL);
     while (s_signo == 0) {
@@ -436,5 +447,7 @@ main(int argc, char *argv[])
     }
     MG_INFO(("exit s_signo=%u", s_signo));
     mg_mgr_free(&mgr);
+    if (s_log)
+        fclose(s_log);
     return 0;
 }
