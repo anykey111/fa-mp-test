@@ -136,7 +136,7 @@ send_tagged_u32(struct mg_connection *c, u32 u)
 }
 
 static void
-log_packet(u16 rem_port, struct MPHeader *h)
+log_packet(u16 from, u16 to, struct MPHeader *h)
 {
     if (!s_log)
         return;
@@ -153,7 +153,11 @@ log_packet(u16 rem_port, struct MPHeader *h)
     for (size_t i = 0, n = 0; i<h->len; ++i) {
         n += mg_snprintf(hex + n, sizeof(hex) - n, "%02X", h->data[i]);
     }
-    fprintf(s_log, "%u\t%s\t%u\t%u\t%u\t%u\tx'%s'\n", rem_port, mp_name, h->ser, h->irt, h->seq, h->expected, hex);
+    static uint64_t s_start_time = 0;
+    if (!s_start_time)
+        s_start_time = mg_millis();
+    fprintf(s_log, "%u\t%u\t%u\t%s\t%u\t%u\t%u\t%u\tx'%s'\n",
+        (uint32_t)(mg_millis() - s_start_time), from, to, mp_name, h->ser, h->irt, h->seq, h->expected, hex);
 }
 
 static void
@@ -198,7 +202,7 @@ proxy_fn(struct mg_connection *c, int ev, void *ev_data)
         if (h->ser > player->next_ser)
             player->next_ser = h->ser;
         // packet from the game
-        log_packet(rem_port, h);
+        log_packet(rem_port, player->lobby_port, h);
         struct MPHeader *irt_dat = recent_lookup_dat(&player->inbox, h->irt);
         if (s_fake_ack && h->type == MP_ACK && irt_dat)
             return; // skip ACK only for DAT packets
@@ -216,7 +220,6 @@ proxy_fn(struct mg_connection *c, int ev, void *ev_data)
     } else {
         // packet from the proxy
         rem_port -= 1000;
-        log_packet(rem_port, h);
         recent_add(&player->inbox, h);
     }
     c->rem.port = mg_htons(rem_port);
@@ -442,7 +445,7 @@ main(int argc, char *argv[])
                 exit(EXIT_FAILURE);
             }
             MG_INFO(("start recording to %s", filename));
-            fprintf(s_log, "port\ttype\tser\tirt\tseq\texpected\n");
+            fprintf(s_log, "ts\tsrc\tdst\ttype\tser\tirt\tseq\texpected\tdata\n");
         } else {
             usage(argv[0]);
         }
