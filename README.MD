@@ -24,11 +24,18 @@ The log file using CSV format that also compatible with sqlite3
 
 ## Fields
 
-`ts` - time in milliseconds since the game start
-`src` - source port
-`dst` - destination port
-`type` - packet type
+- `ts` - time in milliseconds since the game start
+- `src` - source port
+- `dst` - destination port
+- `type` - packet type
+- `ser` - packet serial number
+- `irt` - in reply to `ser`
+- `seq` - data sequence number
+- `expected` - expected sequence number
+- `data` - packet payload (hex blob)
 
+### packet type
+    
     CON connection request
     ANS anwser to CON
     DAT data packet
@@ -36,13 +43,6 @@ The log file using CSV format that also compatible with sqlite3
     KPA keep alive packet
     GBY goodbye
     UNK unknown packet
-    
-`ser` - packet serial number
-`irt` - in reply to `ser`
-`seq` - data sequence number
-`expected` - expected sequence number
-`data` - packet payload (hex blob)
-
 
 ## Import into sqlite3
 
