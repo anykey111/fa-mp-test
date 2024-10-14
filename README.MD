@@ -18,6 +18,23 @@ The server work only for localhost games, user can run up to 3 game instances on
     # Ensure that WORKDIR is set to the actual FAF installation directory (c:\ProgramData\FAForever\bin\ by default)
     fa-test.cmd
 
+## Usefull tweaks "lua.nx2/userInit.lua"
+
+remove ConExecute function hook
+
+    _G.ConExecute = function(command)
+        ...
+    end
+
+add lines
+    
+    ConExecute('net_DebugLevel 5')
+    ConExecute('net_CompressionMethod 0')
+    ConExecute('net_SendDelay 25')
+    ConExecute('net_AckDelay 25')
+    ConExecute('net_MaxBacklog 64000')
+    ConExecute('net_MaxSendRate 64000')
+
 # .csv log
 
 The log file using CSV format that also compatible with sqlite3
@@ -44,9 +61,30 @@ The log file using CSV format that also compatible with sqlite3
     GBY goodbye
     UNK unknown packet
 
+### packet data
+
+Data field contains byte stream, that later broken down into individual messages
+
+    struct MPMsg {
+        u8  type; // message type
+        u16 len;  // total message length, including the `type`
+        u8  data[len - 1]; // message data
+    }
+
+Messages that games send even when all players are idle, probably related to simtick.
+
+    // 32 0800 00 6b000000 (type=0x32 len=8 flag=0 simtick=107)
+    // 00 7000 1000000 (type=0x00 len=7 value=1)
+    // 34 0700 6b000000 (type=0x34 len=7 simtick=107)
+    // 33 0700 6b000000 (type=0x33 len=7 simtick=107)
+
 ## Import into sqlite3
 
     # load .cvs into the temporary table named `fa`, then select first 100 DAT packets where port is equal to 6001, then sort by `ser` field
     sqlite3 -cmd "create table fa(ts, src int, dst int, type int, ser int, irt int, seq int, expected int, data blob)" -cmd ".mode tab" -cmd ".import log.csv fa"
-    >select * from fa where port = 6001 and type = 'DAT' order by ser limit 100;
+    >select * from fa where src = 6001 and type = 'DAT' order by ser limit 100;
+
+    # dump exchange between player1 and player2
+    >.output p1p2.csv
+    >select * from fa where src = 6001 and dst = 6002 or src = 6002 and dst == 6001;
 

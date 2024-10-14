@@ -44,14 +44,21 @@ struct GPGNetClient {
 #define MP_NAT 8 // NAT Type
 
 struct MPHeader {
-    uint8_t  type;
-    uint32_t mask;
-    uint16_t ser;
-    uint16_t irt;
-    uint16_t seq;
-    uint16_t expected;
-    uint16_t len;
-    uint8_t data[0];
+    u8  type;
+    u32 mask;
+    u16 ser;
+    u16 irt;
+    u16 seq;
+    u16 expected;
+    u16 len;
+    u8  data[0];
+} __attribute__((packed));
+
+struct MPMsg {
+    u8  type;
+    // the whole message length including the type field
+    u16 len;
+    u8  data[0];
 } __attribute__((packed));
 
 struct MPRecentList {
@@ -157,7 +164,30 @@ log_packet(u16 from, u16 to, struct MPHeader *h)
     if (!s_start_time)
         s_start_time = mg_millis();
     fprintf(s_log, "%u\t%u\t%u\t%s\t%u\t%u\t%u\t%u\tx'%s'\n",
-        (uint32_t)(mg_millis() - s_start_time), from, to, mp_name, h->ser, h->irt, h->seq, h->expected, hex);
+        (u32)(mg_millis() - s_start_time), from, to, mp_name, h->ser, h->irt, h->seq, h->expected, hex);
+    const u8 *ptr = h->data;
+    const u8 *end = h->data + h->len;
+    bool enable_comments = false;
+    while (enable_comments && ptr < end) {
+        struct MPMsg *msg = (struct MPMsg *)ptr;
+        ptr += msg->len;
+        if (msg->len == 0 || ptr > end) {
+            MG_ERROR(("MPMsg parse error, len=%u ptr=%p end=%p", msg->len, ptr, end));
+            break;
+        }
+        if (msg->type == 0x32) {
+            fprintf(s_log, " -- %#02x %u %u\n", msg->type, msg->data[0], *(u32*)(msg->data + 1));
+        } else if (msg->type == 0x33) {
+            fprintf(s_log, " -- %#02x   %u\n", msg->type, *(u32*)msg->data);
+        } else if (msg->type == 0x34) {
+            fprintf(s_log, " -- %#02x   %u\n", msg->type, *(u32*)msg->data);
+        } else if (msg->type == 0x00) {
+            fprintf(s_log, " -- %#02x   %u\n", msg->type, *(u32*)msg->data);
+        } else {
+            // unknown message
+            fprintf(s_log, " -- %#02x   %u bytes", msg->type, msg->len - 1);
+        }
+    }
 }
 
 static void
@@ -196,7 +226,7 @@ proxy_fn(struct mg_connection *c, int ev, void *ev_data)
     }
     if (ev != MG_EV_READ)
         return;
-    uint16_t rem_port = mg_ntohs(c->rem.port);
+    u16 rem_port = mg_ntohs(c->rem.port);
     struct MPHeader *h = (struct MPHeader *)c->recv.buf;
     if (rem_port < 7000) {
         if (h->ser > player->next_ser)
@@ -223,7 +253,6 @@ proxy_fn(struct mg_connection *c, int ev, void *ev_data)
         recent_add(&player->inbox, h);
     }
     c->rem.port = mg_htons(rem_port);
-    MG_DEBUG(("redirect %u to %u", mg_ntohs(c->loc.port), mg_ntohs(c->rem.port)));
     mg_send(c, c->recv.buf, c->recv.len);
     c->recv.len = 0;
     (void)ev_data;
