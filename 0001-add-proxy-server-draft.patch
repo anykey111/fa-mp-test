@@ -1,0 +1,899 @@
+From 7955f0970fab448786d68f55b2097c2923f7dbc4 Mon Sep 17 00:00:00 2001
+From: anykey111 <rsamoilov@naver.com>
+Date: Thu, 15 Aug 2024 01:46:54 +0300
+Subject: [PATCH] add proxy server draft
+
+---
+ .../com/faforever/iceadapter/IceAdapter.java  |  34 ++-
+ .../com/faforever/iceadapter/IceStatus.java   |   8 +-
+ .../com/faforever/iceadapter/debug/Debug.java |   9 +-
+ .../iceadapter/debug/DebugWindow.java         |  42 +--
+ .../iceadapter/debug/TelemetryDebugger.java   |  87 +++---
+ .../iceadapter/gpgnet/GPGNetServer.java       |  14 +-
+ .../faforever/iceadapter/ice/GameSession.java | 278 +++++++++++-------
+ .../com/faforever/iceadapter/ice/Peer.java    |  24 +-
+ .../faforever/iceadapter/rpc/RPCHandler.java  |  70 ++---
+ 9 files changed, 313 insertions(+), 253 deletions(-)
+
+diff --git a/ice-adapter/src/main/java/com/faforever/iceadapter/IceAdapter.java b/ice-adapter/src/main/java/com/faforever/iceadapter/IceAdapter.java
+index d4caace..9fa0bdc 100644
+--- a/ice-adapter/src/main/java/com/faforever/iceadapter/IceAdapter.java
++++ b/ice-adapter/src/main/java/com/faforever/iceadapter/IceAdapter.java
+@@ -1,18 +1,18 @@
+ package com.faforever.iceadapter;
+ 
++import java.util.concurrent.Callable;
++
+ import com.faforever.iceadapter.debug.Debug;
++import static com.faforever.iceadapter.debug.Debug.debug;
+ import com.faforever.iceadapter.gpgnet.GPGNetServer;
+ import com.faforever.iceadapter.gpgnet.GameState;
+ import com.faforever.iceadapter.ice.GameSession;
+ import com.faforever.iceadapter.rpc.RPCService;
+ import com.faforever.iceadapter.util.Executor;
+ import com.faforever.iceadapter.util.TrayIcon;
++
+ import lombok.extern.slf4j.Slf4j;
+ import picocli.CommandLine;
+-
+-import java.util.concurrent.Callable;
+-
+-import static com.faforever.iceadapter.debug.Debug.debug;
+ @CommandLine.Command(name = "faf-ice-adapter", mixinStandardHelpOptions = true, usageHelpAutoWidth = true,
+         description = "An ice (RFC 5245) based network bridge between FAF client and ForgedAlliance.exe")
+ @Slf4j
+@@ -80,7 +80,9 @@ public class IceAdapter implements Callable<Integer> {
+ 
+     public static void onHostGame(String mapName) {
+         log.info("onHostGame");
+-        createGameSession();
++        if (!createGameSession()) {
++            return;
++        }
+ 
+         GPGNetServer.clientFuture.thenAccept(gpgNetClient -> {
+             gpgNetClient.getLobbyFuture().thenRun(() -> {
+@@ -91,7 +93,9 @@ public class IceAdapter implements Callable<Integer> {
+ 
+     public static void onJoinGame(String remotePlayerLogin, int remotePlayerId) {
+         log.info("onJoinGame {} {}", remotePlayerId, remotePlayerLogin);
+-        createGameSession();
++        if (!createGameSession()) {
++            return;
++        }
+         int port = gameSession.connectToPeer(remotePlayerLogin, remotePlayerId, false);
+ 
+         GPGNetServer.clientFuture.thenAccept(gpgNetClient -> {
+@@ -128,13 +132,19 @@ public class IceAdapter implements Callable<Integer> {
+         });
+     }
+ 
+-    private synchronized static void createGameSession() {
+-        if (gameSession != null) {
+-            gameSession.close();
+-            gameSession = null;
++    private synchronized static boolean createGameSession() {
++        try {
++            log.info("gameSession {}", gameSession);
++            if (gameSession == null) {
++                gameSession = new GameSession();
++                gameSession.init();
++                return true;
++            }
++        } catch (Exception e) {
++            log.error("createGameSession {}", e);
++            System.exit(11);
+         }
+-
+-        gameSession = new GameSession();
++        return false;
+     }
+ 
+     /**
+diff --git a/ice-adapter/src/main/java/com/faforever/iceadapter/IceStatus.java b/ice-adapter/src/main/java/com/faforever/iceadapter/IceStatus.java
+index fb5b960..83e6006 100644
+--- a/ice-adapter/src/main/java/com/faforever/iceadapter/IceStatus.java
++++ b/ice-adapter/src/main/java/com/faforever/iceadapter/IceStatus.java
+@@ -8,7 +8,7 @@ import lombok.Data;
+  */
+ @Data
+ @AllArgsConstructor
+-@Deprecated(forRemoval = true)
++//@Deprecated(forRemoval = true)
+ public class IceStatus {
+     private String version;
+     private int ice_servers_size;
+@@ -20,7 +20,7 @@ public class IceStatus {
+ 
+     @Data
+     @AllArgsConstructor
+-    @Deprecated(forRemoval = true)
++    //@Deprecated(forRemoval = true)
+     public static class IceOptions {
+         private int player_id;
+         private String player_login;
+@@ -30,7 +30,7 @@ public class IceStatus {
+ 
+     @Data
+     @AllArgsConstructor
+-    @Deprecated(forRemoval = true)
++    //@Deprecated(forRemoval = true)
+     public static class IceGPGNetState {
+         private int local_port;
+         private boolean connected;
+@@ -40,7 +40,7 @@ public class IceStatus {
+ 
+     @Data
+     @AllArgsConstructor
+-    @Deprecated(forRemoval = true)
++    //@Deprecated(forRemoval = true)
+     public static class IceRelay {
+ 
+         private int remote_player_id;
+diff --git a/ice-adapter/src/main/java/com/faforever/iceadapter/debug/Debug.java b/ice-adapter/src/main/java/com/faforever/iceadapter/debug/Debug.java
+index 140838e..79a3249 100644
+--- a/ice-adapter/src/main/java/com/faforever/iceadapter/debug/Debug.java
++++ b/ice-adapter/src/main/java/com/faforever/iceadapter/debug/Debug.java
+@@ -1,11 +1,8 @@
+ package com.faforever.iceadapter.debug;
+ 
+-import com.faforever.iceadapter.IceAdapter;
+-import lombok.extern.slf4j.Slf4j;
+-
+ import java.lang.reflect.InvocationTargetException;
+-import java.util.concurrent.CompletableFuture;
+-import java.util.concurrent.ExecutionException;
++
++import lombok.extern.slf4j.Slf4j;
+ 
+ @Slf4j
+ public class Debug {
+@@ -27,7 +24,7 @@ public class Debug {
+ 	}
+ 
+ 	public static void init() {
+-		new TelemetryDebugger(IceAdapter.TELEMETRY_SERVER, IceAdapter.gameId, IceAdapter.id);
++		//new TelemetryDebugger(IceAdapter.TELEMETRY_SERVER, IceAdapter.gameId, IceAdapter.id);
+ 
+ 		// Debugger window is started and set to debugFuture when either window is requested as the info window can be used to open the debug window
+ 		// This is not used anymore as the debug window is started and hidden in case it is requested via the tray icon
+diff --git a/ice-adapter/src/main/java/com/faforever/iceadapter/debug/DebugWindow.java b/ice-adapter/src/main/java/com/faforever/iceadapter/debug/DebugWindow.java
+index 336bf0e..5b282e4 100644
+--- a/ice-adapter/src/main/java/com/faforever/iceadapter/debug/DebugWindow.java
++++ b/ice-adapter/src/main/java/com/faforever/iceadapter/debug/DebugWindow.java
+@@ -163,31 +163,31 @@ public class DebugWindow extends Application implements Debugger {
+ 
+     @Override
+     public void peerStateChanged(Peer peer) {
+-        new Thread(() -> {
+-            synchronized (peers) {
+-                peers.stream().filter(p -> p.id.get() == peer.getRemoteId()).forEach(p -> {
+-                    p.connected.set(peer.getIce().isConnected());
+-                    p.state.set(peer.getIce().getIceState().getMessage());
+-                    p.localCandidate.set(Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getLocalCandidate).map(Candidate::getType).map(CandidateType::toString).orElse(""));
+-                    p.remoteCandidate.set(Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getRemoteCandidate).map(Candidate::getType).map(CandidateType::toString).orElse(""));
+-                });
+-            }
+-        }).start();
++        // new Thread(() -> {
++        //     synchronized (peers) {
++        //         peers.stream().filter(p -> p.id.get() == peer.getRemoteId()).forEach(p -> {
++        //             p.connected.set(peer.getIce().isConnected());
++        //             p.state.set(peer.getIce().getIceState().getMessage());
++        //             p.localCandidate.set(Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getLocalCandidate).map(Candidate::getType).map(CandidateType::toString).orElse(""));
++        //             p.remoteCandidate.set(Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getRemoteCandidate).map(Candidate::getType).map(CandidateType::toString).orElse(""));
++        //         });
++        //     }
++        // }).start();
+     }
+ 
+     @Override
+     public void peerConnectivityUpdate(Peer peer) {
+-        runOnUIThread(() -> {
+-            synchronized (peers) {
+-                peers.stream().filter(p -> p.id.get() == peer.getRemoteId()).forEach(p -> {
+-                    Optional<PeerConnectivityCheckerModule> connectivityChecker = Optional.ofNullable(peer.getIce().getConnectivityChecker());
+-                    p.averageRtt.set(connectivityChecker.map(PeerConnectivityCheckerModule::getAverageRTT).orElse(-1.0f).intValue());
+-                    p.lastReceived.set(connectivityChecker.map(PeerConnectivityCheckerModule::getLastPacketReceived).map(last -> System.currentTimeMillis() - last).orElse(-1L).intValue());
+-                    p.echosReceived.set(connectivityChecker.map(PeerConnectivityCheckerModule::getEchosReceived).orElse(-1L).intValue());
+-                    p.echosReceived.set(connectivityChecker.map(PeerConnectivityCheckerModule::getEchosReceived).orElse(-1L).intValue());
+-                });
+-            }
+-        });
++        // runOnUIThread(() -> {
++        //     synchronized (peers) {
++        //         peers.stream().filter(p -> p.id.get() == peer.getRemoteId()).forEach(p -> {
++        //             Optional<PeerConnectivityCheckerModule> connectivityChecker = Optional.ofNullable(peer.getIce().getConnectivityChecker());
++        //             p.averageRtt.set(connectivityChecker.map(PeerConnectivityCheckerModule::getAverageRTT).orElse(-1.0f).intValue());
++        //             p.lastReceived.set(connectivityChecker.map(PeerConnectivityCheckerModule::getLastPacketReceived).map(last -> System.currentTimeMillis() - last).orElse(-1L).intValue());
++        //             p.echosReceived.set(connectivityChecker.map(PeerConnectivityCheckerModule::getEchosReceived).orElse(-1L).intValue());
++        //             p.echosReceived.set(connectivityChecker.map(PeerConnectivityCheckerModule::getEchosReceived).orElse(-1L).intValue());
++        //         });
++        //     }
++        // });
+     }
+ 
+     private void runOnUIThread(Runnable runnable) {
+diff --git a/ice-adapter/src/main/java/com/faforever/iceadapter/debug/TelemetryDebugger.java b/ice-adapter/src/main/java/com/faforever/iceadapter/debug/TelemetryDebugger.java
+index 3bf7a2e..4343f98 100644
+--- a/ice-adapter/src/main/java/com/faforever/iceadapter/debug/TelemetryDebugger.java
++++ b/ice-adapter/src/main/java/com/faforever/iceadapter/debug/TelemetryDebugger.java
+@@ -1,9 +1,21 @@
+ package com.faforever.iceadapter.debug;
+ 
++import java.net.ConnectException;
++import java.net.URI;
++import java.util.Collection;
++import java.util.Map;
++import java.util.UUID;
++import java.util.concurrent.BlockingQueue;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.LinkedBlockingQueue;
++
++import org.java_websocket.client.WebSocketClient;
++import org.java_websocket.handshake.ServerHandshake;
++
+ import com.faforever.iceadapter.IceAdapter;
+ import com.faforever.iceadapter.gpgnet.GPGNetServer;
+ import com.faforever.iceadapter.ice.Peer;
+-import com.faforever.iceadapter.ice.PeerConnectivityCheckerModule;
+ import com.faforever.iceadapter.telemetry.ConnectToPeer;
+ import com.faforever.iceadapter.telemetry.CoturnServer;
+ import com.faforever.iceadapter.telemetry.DisconnectFromPeer;
+@@ -12,32 +24,13 @@ import com.faforever.iceadapter.telemetry.RegisterAsPeer;
+ import com.faforever.iceadapter.telemetry.UpdateCoturnList;
+ import com.faforever.iceadapter.telemetry.UpdateGameState;
+ import com.faforever.iceadapter.telemetry.UpdateGpgnetState;
+-import com.faforever.iceadapter.telemetry.UpdatePeerConnectivity;
+-import com.faforever.iceadapter.telemetry.UpdatePeerState;
+ import com.fasterxml.jackson.databind.ObjectMapper;
+ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+ import com.google.common.util.concurrent.RateLimiter;
+ import com.nbarraille.jjsonrpc.JJsonPeer;
++
+ import lombok.SneakyThrows;
+ import lombok.extern.slf4j.Slf4j;
+-import org.ice4j.ice.Candidate;
+-import org.ice4j.ice.CandidatePair;
+-import org.ice4j.ice.Component;
+-import org.java_websocket.client.WebSocketClient;
+-import org.java_websocket.handshake.ServerHandshake;
+-
+-import java.io.IOException;
+-import java.net.ConnectException;
+-import java.net.URI;
+-import java.time.Instant;
+-import java.util.Collection;
+-import java.util.Map;
+-import java.util.Optional;
+-import java.util.UUID;
+-import java.util.concurrent.BlockingQueue;
+-import java.util.concurrent.CompletableFuture;
+-import java.util.concurrent.ConcurrentHashMap;
+-import java.util.concurrent.LinkedBlockingQueue;
+ 
+ @Slf4j
+ public class TelemetryDebugger implements Debugger {
+@@ -182,21 +175,21 @@ public class TelemetryDebugger implements Debugger {
+ 
+     @Override
+     public void peerStateChanged(Peer peer) {
+-        sendMessage(new UpdatePeerState(
+-                UUID.randomUUID(),
+-                peer.getRemoteId(),
+-                peer.getIce().getIceState(),
+-                Optional.ofNullable(peer.getIce().getComponent())
+-                        .map(Component::getSelectedPair)
+-                        .map(CandidatePair::getLocalCandidate)
+-                        .map(Candidate::getType)
+-                        .orElse(null),
+-                Optional.ofNullable(peer.getIce().getComponent())
+-                        .map(Component::getSelectedPair)
+-                        .map(CandidatePair::getRemoteCandidate)
+-                        .map(Candidate::getType)
+-                        .orElse(null)
+-        ));
++        // sendMessage(new UpdatePeerState(
++        //         UUID.randomUUID(),
++        //         peer.getRemoteId(),
++        //         peer.getIce().getIceState(),
++        //         Optional.ofNullable(peer.getIce().getComponent())
++        //                 .map(Component::getSelectedPair)
++        //                 .map(CandidatePair::getLocalCandidate)
++        //                 .map(Candidate::getType)
++        //                 .orElse(null),
++        //         Optional.ofNullable(peer.getIce().getComponent())
++        //                 .map(Component::getSelectedPair)
++        //                 .map(CandidatePair::getRemoteCandidate)
++        //                 .map(Candidate::getType)
++        //                 .orElse(null)
++        // ));
+     }
+ 
+     @Override
+@@ -211,17 +204,17 @@ public class TelemetryDebugger implements Debugger {
+ 
+         log.trace("Sending connectivity update for peer {} (id {})", peer.getRemoteLogin(), peer.getRemoteId());
+ 
+-        sendMessage(new UpdatePeerConnectivity(
+-                UUID.randomUUID(),
+-                peer.getRemoteId(),
+-                Optional.ofNullable(peer.getIce().getConnectivityChecker())
+-                        .map(PeerConnectivityCheckerModule::getAverageRTT)
+-                        .orElse(null),
+-                Optional.ofNullable(peer.getIce().getConnectivityChecker())
+-                        .map(PeerConnectivityCheckerModule::getLastPacketReceived)
+-                        .map(Instant::ofEpochMilli)
+-                        .orElse(null)
+-        ));
++        // sendMessage(new UpdatePeerConnectivity(
++        //         UUID.randomUUID(),
++        //         peer.getRemoteId(),
++        //         Optional.ofNullable(peer.getIce().getConnectivityChecker())
++        //                 .map(PeerConnectivityCheckerModule::getAverageRTT)
++        //                 .orElse(null),
++        //         Optional.ofNullable(peer.getIce().getConnectivityChecker())
++        //                 .map(PeerConnectivityCheckerModule::getLastPacketReceived)
++        //                 .map(Instant::ofEpochMilli)
++        //                 .orElse(null)
++        // ));
+     }
+ 
+     @Override
+diff --git a/ice-adapter/src/main/java/com/faforever/iceadapter/gpgnet/GPGNetServer.java b/ice-adapter/src/main/java/com/faforever/iceadapter/gpgnet/GPGNetServer.java
+index 4420ad3..2064141 100644
+--- a/ice-adapter/src/main/java/com/faforever/iceadapter/gpgnet/GPGNetServer.java
++++ b/ice-adapter/src/main/java/com/faforever/iceadapter/gpgnet/GPGNetServer.java
+@@ -1,11 +1,5 @@
+ package com.faforever.iceadapter.gpgnet;
+ 
+-import com.faforever.iceadapter.IceAdapter;
+-import com.faforever.iceadapter.rpc.RPCService;
+-import com.faforever.iceadapter.util.NetworkToolbox;
+-import lombok.Getter;
+-import lombok.extern.slf4j.Slf4j;
+-
+ import java.io.IOException;
+ import java.net.ServerSocket;
+ import java.net.Socket;
+@@ -16,7 +10,13 @@ import java.util.Optional;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.stream.Collectors;
+ 
++import com.faforever.iceadapter.IceAdapter;
+ import static com.faforever.iceadapter.debug.Debug.debug;
++import com.faforever.iceadapter.rpc.RPCService;
++import com.faforever.iceadapter.util.NetworkToolbox;
++
++import lombok.Getter;
++import lombok.extern.slf4j.Slf4j;
+ 
+ @Slf4j
+ public class GPGNetServer {
+@@ -109,6 +109,7 @@ public class GPGNetServer {
+                     }
+                 }
+                 default -> {
++                    log.debug("GPGNetMessage {} {}", command, args);
+                     //No need to log, as we are not processing all messages but just forward them via RPC
+                 }
+             }
+@@ -141,6 +142,7 @@ public class GPGNetServer {
+                 while ((!triggerActive || GPGNetServer.currentClient == this) && !stopping) {
+                     String command = gpgnetIn.readString();
+                     List<Object> args = gpgnetIn.readChunks();
++                    log.debug("Recv GPGNet message: {} {}", command, args);
+ 
+                     processGpgnetMessage(command, args);
+ 
+diff --git a/ice-adapter/src/main/java/com/faforever/iceadapter/ice/GameSession.java b/ice-adapter/src/main/java/com/faforever/iceadapter/ice/GameSession.java
+index 7819e6c..bd3b7c9 100644
+--- a/ice-adapter/src/main/java/com/faforever/iceadapter/ice/GameSession.java
++++ b/ice-adapter/src/main/java/com/faforever/iceadapter/ice/GameSession.java
+@@ -1,50 +1,72 @@
+ package com.faforever.iceadapter.ice;
+ 
+-import com.faforever.iceadapter.IceAdapter;
+-import com.faforever.iceadapter.telemetry.CoturnServer;
+-import com.faforever.iceadapter.util.PingWrapper;
+-import com.google.common.cache.CacheBuilder;
+-import com.google.common.cache.CacheLoader;
+-import com.google.common.cache.LoadingCache;
+-import lombok.Getter;
+-import lombok.Setter;
+-import lombok.extern.slf4j.Slf4j;
+-import org.ice4j.Transport;
+-import org.ice4j.TransportAddress;
+-
+-import java.net.URI;
++import java.io.IOException;
++import java.net.InetSocketAddress;
++import java.net.Socket;
++import java.net.SocketAddress;
++import java.nio.charset.StandardCharsets;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+-import java.util.Collections;
+-import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
+-import java.util.Objects;
+-import java.util.Optional;
+-import java.util.OptionalDouble;
+-import java.util.Set;
+-import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentLinkedQueue;
+ 
++import com.faforever.iceadapter.IceAdapter;
+ import static com.faforever.iceadapter.debug.Debug.debug;
++import com.faforever.iceadapter.rpc.RPCService;
++import com.google.common.io.LittleEndianDataInputStream;
++import com.google.common.io.LittleEndianDataOutputStream;
++
++import lombok.Getter;
++import lombok.Setter;
++import lombok.extern.slf4j.Slf4j;
++
++class FaPacket {
++    public int remoteId;
++    public byte[] data;
++    public int length;
++
++    public FaPacket(int remoteId, byte[] data, int length) {
++        this.remoteId = remoteId;
++        this.data = Arrays.copyOf(data, length);
++        this.length = length;
++    }
++};
+ 
+ /**
+  * Represents a game session and the current ICE status/communication with all peers
+  * Is created by a JoinGame or HostGame event (via RPC), is destroyed by a gpgnet connection breakdown
+  */
+ @Slf4j
+-public class GameSession {
++public class GameSession extends Thread {
+ 
+-    private static final String STUN = "stun";
+-    private static final String TURN = "turn";
+     @Getter
+     private final Map<Integer, Peer> peers = new ConcurrentHashMap<>();
+     @Getter
+     @Setter
+     private volatile boolean gameEnded = false;
+ 
++    static ConcurrentLinkedQueue<FaPacket> faPackets = new ConcurrentLinkedQueue<>();
++
++    SocketAddress endpoint;
++    Socket socket;
++    LittleEndianDataInputStream in;
++    LittleEndianDataOutputStream out;
++
++    int packetType;
++    int gameId;
++    int senderId;
++    int receiverId;
++    int packetLength;
++
+     public GameSession() {
++    }
+ 
++    public void init() throws IOException {
++        socket = new Socket();
++        endpoint = new InetSocketAddress("192.168.1.66", 7788);
++        this.start();
+     }
+ 
+     /**
+@@ -52,7 +74,7 @@ public class GameSession {
+      *
+      * @return the port the ice adapter will be listening/sending for FA
+      */
+-    public int connectToPeer(String remotePlayerLogin, int remotePlayerId, boolean offer) {
++    public synchronized int connectToPeer(String remotePlayerLogin, int remotePlayerId, boolean offer) {
+         Peer peer = new Peer(this, remotePlayerId, remotePlayerLogin, offer);
+         peers.put(remotePlayerId, peer);
+         debug().connectToPeer(remotePlayerId, remotePlayerLogin, offer);
+@@ -62,14 +84,12 @@ public class GameSession {
+     /**
+      * Disconnects from a peer (ICE)
+      */
+-    public void disconnectFromPeer(int remotePlayerId) {
++    public synchronized void disconnectFromPeer(int remotePlayerId) {
+         Peer removedPeer = peers.remove(remotePlayerId);
+         if (removedPeer != null) {
+             removedPeer.close();
+             debug().disconnectFromPeer(remotePlayerId);
+         }
+-        //TODO: still testing connectivity and reporting disconnect via rpc, why???
+-        //TODO: still attempting to ICE
+     }
+ 
+     /**
+@@ -81,97 +101,139 @@ public class GameSession {
+         peers.clear();
+     }
+ 
+-    @Getter
+-    private static final List<IceServer> iceServers = new ArrayList<>();
+-
+-    /**
+-     * Set ice servers (to be used for harvesting candidates)
+-     * Called by the client via jsonRPC
+-     */
+-    public static void setIceServers(List<Map<String, Object>> iceServersData) {
+-        GameSession.iceServers.clear();
+-
+-        if (iceServersData.isEmpty()) {
+-            return;
+-        }
+-
+-        // For caching RTT to a given host (the same host can appear in multiple urls)
+-        LoadingCache<String, CompletableFuture<OptionalDouble>> hostRTTCache = CacheBuilder.newBuilder()
+-                                                                                           .build(new CacheLoader<>() {
+-                                                                                               @Override
+-                                                                                               public CompletableFuture<OptionalDouble> load(String host) {
+-                                                                                                   return PingWrapper.getLatency(host, IceAdapter.PING_COUNT)
+-                                                                                                                     .thenApply(OptionalDouble::of)
+-                                                                                                                     .exceptionally(ex -> OptionalDouble.empty());
+-                                                                                               }
+-                                                                                           });
+-
+-        Set<CoturnServer> coturnServers = new HashSet<>();
++    void sendAuth() throws IOException {
++        log.info("send auth data gameId={} playerId={}", IceAdapter.gameId, IceAdapter.id);
++        byte[] data = IceAdapter.login.getBytes(StandardCharsets.UTF_8);
++        sendPacket(0xAD, IceAdapter.id, data, data.length);
++    }
+ 
+-        for (Map<String, Object> iceServerData : iceServersData) {
+-            IceServer iceServer = new IceServer();
++    void sendPacket(int packetType, int receiverId, byte[] data, int length) throws IOException {
++        socket.setTcpNoDelay(false);
++        out.writeByte(packetType);
++        out.writeByte(0);
++        out.writeShort(data.length);
++        out.writeInt(IceAdapter.gameId);
++        out.writeInt(IceAdapter.id);
++        out.writeInt(receiverId);
++        out.write(data);
++        socket.setTcpNoDelay(true);
++    }
+ 
+-            if (iceServerData.containsKey("username")) {
+-                iceServer.setTurnUsername((String) iceServerData.get("username"));
++    @Override
++    public void run() {
++        int numAttempts = 0;
++        while (IceAdapter.running && IceAdapter.gameSession == this) {
++            // if (numAttempts > 10) {
++            //     log.error("give up");
++            //     break;
++            // }
++            if (!socket.isConnected()) {
++                try {
++                    socket.close();
++                    socket = new Socket();
++                    log.debug("connect to proxy server {}", endpoint);
++                    socket.connect(endpoint, 15000);
++                    in = new LittleEndianDataInputStream(socket.getInputStream());
++                    out = new LittleEndianDataOutputStream(socket.getOutputStream());
++                    sendAuth();
++                } catch (IOException e) {
++                    numAttempts += 1;
++                    log.warn("connection failed {}", e);
++                    try {
++                        Thread.sleep(5000);
++                    } catch (InterruptedException e2) {
++                        break;
++                    }
++                    continue;
++                }
+             }
+-            if (iceServerData.containsKey("credential")) {
+-                iceServer.setTurnCredential((String) iceServerData.get("credential"));
++            try {
++                processIncomingPackets();
++                processOutgoingPackets();
++                Thread.sleep(0);
++            } catch (Exception e) {
++                log.error("packet processing error {}, reconnect", e);
++                numAttempts += 1;
++                try {
++                    socket.close();
++                } catch (IOException e2) {
++                    log.warn("socket close error {}", e2);
++                }
+             }
++        }
++    }
+ 
+-            if (iceServerData.containsKey("urls")) {
+-                List<String> urls;
+-                Object urlsData = iceServerData.get("urls");
+-                if (urlsData instanceof List) {
+-                    urls = (List<String>) urlsData;
+-                } else {
+-                    urls = Collections.singletonList((String) iceServerData.get("url"));
+-                }
++    public void onFaDataReceived(int remoteId, byte[] data, int length) {
++        log.debug("recv packet len={}", length);
++        faPackets.add(new FaPacket(remoteId, data, length));
++    }
+ 
+-                urls.stream().map(stringUrl -> {
+-                    try {
+-                        return new URI(stringUrl);
+-                    } catch (Exception e) {
+-                        log.warn("Invalid ICE server URI: {}", stringUrl);
+-                        return null;
+-                    }
+-                }).filter(Objects::nonNull).forEach(uri -> {
+-                    String host = uri.getHost();
+-                    int port = uri.getPort() == -1 ? 3478 : uri.getPort();
+-                    Transport transport = Optional.ofNullable(uri.getQuery())
+-                                                  .stream()
+-                                                  .flatMap(query -> Arrays.stream(query.split("&")))
+-                                                  .map(param -> param.split("="))
+-                                                  .filter(param -> param.length == 2)
+-                                                  .filter(param -> param[0].equals("transport"))
+-                                                  .map(param -> param[1])
+-                                                  .map(Transport::parse)
+-                                                  .findFirst()
+-                                                  .orElse(Transport.UDP);
+-
+-                    TransportAddress address = new TransportAddress(host, port, transport);
+-                    switch (uri.getScheme()) {
+-                        case STUN -> iceServer.getStunAddresses().add(address);
+-                        case TURN -> iceServer.getTurnAddresses().add(address);
+-                        default -> log.warn("Invalid ICE server protocol: {}", uri);
+-                    }
++    void processOutgoingPackets() throws IOException {
++        FaPacket i;
++        socket.setTcpNoDelay(false);
++        while ((i = faPackets.poll()) != null) {
++            log.debug("forward packet, len={}", i.length);
++            out.writeByte(0xFA);
++            out.writeByte(0);
++            out.writeShort(i.length);
++            out.writeInt(IceAdapter.gameId);
++            out.writeInt(IceAdapter.id);
++            out.writeInt(i.remoteId);
++            out.write(i.data, 0, i.length);
++        }
++        socket.setTcpNoDelay(false);
++    }
+ 
+-                    if (IceAdapter.PING_COUNT > 0) {
+-                        iceServer.setRoundTripTime(hostRTTCache.getUnchecked(host));
++    void processIncomingPackets() throws IOException {
++        if (packetLength == 0 && in.available() >= 16) {
++            packetType = in.readByte();
++            in.readByte(); // unused
++            packetLength = in.readUnsignedShort();
++            gameId = in.readInt();
++            senderId = in.readInt();
++            receiverId = in.readInt();
++            log.debug("packet type={} gameId={} senderId={} receiverId={} packetLength={}",
++                packetType, gameId, senderId, receiverId, packetLength);
++        }
++        if (packetLength > 0 && in.available() >= packetLength) {
++            byte[] data = in.readNBytes(packetLength);
++            int length = packetLength;
++            packetLength = 0;
++            if (gameId != IceAdapter.gameId || receiverId != IceAdapter.id) {
++                log.warn("ignore packet, receiverId={} gameId={}", receiverId, gameId);
++                return;
++            }
++            if (packetType == 0xFA) {
++                synchronized (peers) {
++                    Peer peer = peers.get(senderId);
++                    if (peer == null) {
++                        log.debug("peer not found senderId={}", senderId);
++                    } else {
++                        log.debug("forward packet from={} to={}", senderId, receiverId);
++                        peer.onIceDataReceived(data, 0, length);
+                     }
+-
+-                    coturnServers.add(new CoturnServer("n/a", host, port, null));
+-                });
++                }
++            }
++            if (packetType == 0xCE) {
++                RPCService.onConnected(IceAdapter.id, senderId, true);
++            }
++            if (packetType == 0xDE) {
++                RPCService.onConnected(IceAdapter.id, senderId, false);
++            }
++            if (packetType == 0xEE) {
++                log.error("server error");
+             }
+-
+-            iceServers.add(iceServer);
+         }
++    }
+ 
+-        debug().updateCoturnList(coturnServers);
++    @Getter
++    private static final List<IceServer> iceServers = new ArrayList<>();
+ 
+-        log.info("Ice Servers set, total addresses: {}",
+-                 iceServers.stream()
+-                           .mapToInt(iceServer -> iceServer.getStunAddresses().size() +
+-                                                  iceServer.getTurnAddresses().size())
+-                           .sum());
+-    }
++    /**
++     * Set ice servers (to be used for harvesting candidates)
++     * Called by the client via jsonRPC
++     */
++    public static void setIceServers(List<Map<String, Object>> iceServersData) {
++        log.info("skip setIceServers");
++   }
+ }
+diff --git a/ice-adapter/src/main/java/com/faforever/iceadapter/ice/Peer.java b/ice-adapter/src/main/java/com/faforever/iceadapter/ice/Peer.java
+index a4f3369..6e5a601 100644
+--- a/ice-adapter/src/main/java/com/faforever/iceadapter/ice/Peer.java
++++ b/ice-adapter/src/main/java/com/faforever/iceadapter/ice/Peer.java
+@@ -1,12 +1,17 @@
+ package com.faforever.iceadapter.ice;
+ 
++import java.io.IOException;
++import java.net.DatagramPacket;
++import java.net.DatagramSocket;
++import java.net.InetAddress;
++import java.net.SocketException;
++import java.net.UnknownHostException;
++
+ import com.faforever.iceadapter.IceAdapter;
++
+ import lombok.Getter;
+ import lombok.extern.slf4j.Slf4j;
+ 
+-import java.io.IOException;
+-import java.net.*;
+-
+ /**
+  * Represents a peer in the current game session which we are connected to
+  */
+@@ -20,7 +25,6 @@ public class Peer {
+     private final String remoteLogin;
+     private final boolean localOffer;//Do we offer or are we waiting for a remote offer
+ 
+-    private PeerIceModule ice = new PeerIceModule(this);
+     private DatagramSocket faSocket;//Socket on which we are listening for FA / sending data to FA
+ 
+     public Peer(GameSession gameSession, int remoteId, String remoteLogin, boolean localOffer) {
+@@ -32,10 +36,6 @@ public class Peer {
+         log.debug("Peer created: {}, {}, localOffer: {}", remoteId, remoteLogin, String.valueOf(localOffer));
+ 
+         initForwarding();
+-
+-        if (localOffer) {
+-            new Thread(ice::initiateIce).start();
+-        }
+     }
+ 
+     /**
+@@ -61,7 +61,7 @@ public class Peer {
+      */
+     synchronized void onIceDataReceived(byte data[], int offset, int length) {
+         try {
+-            DatagramPacket packet = new DatagramPacket(data, offset, length, InetAddress.getByName("127.0.0.1"), IceAdapter.LOBBY_PORT);
++            DatagramPacket packet = new DatagramPacket(data, offset, length, InetAddress.getLoopbackAddress(), IceAdapter.LOBBY_PORT);
+             faSocket.send(packet);
+         } catch (UnknownHostException e) {
+         } catch (IOException e) {
+@@ -79,7 +79,7 @@ public class Peer {
+             try {
+                 DatagramPacket packet = new DatagramPacket(data, data.length);
+                 faSocket.receive(packet);
+-                ice.onFaDataReceived(data, packet.getLength());
++                gameSession.onFaDataReceived(remoteId, data, packet.getLength());
+             } catch (IOException e) {
+                 log.debug("Error while reading from local FA as peer (probably disconnecting from peer) " + getPeerIdentifier(), e);
+                 return;
+@@ -100,10 +100,6 @@ public class Peer {
+         if(faSocket != null) {
+             faSocket.close();
+         }
+-
+-        if(ice != null) {
+-            ice.close();
+-        }
+     }
+ 
+     /**
+diff --git a/ice-adapter/src/main/java/com/faforever/iceadapter/rpc/RPCHandler.java b/ice-adapter/src/main/java/com/faforever/iceadapter/rpc/RPCHandler.java
+index 06cc216..044ecca 100644
+--- a/ice-adapter/src/main/java/com/faforever/iceadapter/rpc/RPCHandler.java
++++ b/ice-adapter/src/main/java/com/faforever/iceadapter/rpc/RPCHandler.java
+@@ -59,19 +59,19 @@ public class RPCHandler {
+     public void iceMsg(long remotePlayerId, Object msg) {
+         boolean err = true;
+ 
+-        GameSession gameSession = IceAdapter.gameSession;
+-        if (gameSession != null) {//This is highly unlikely, game session got created if JoinGame/HostGame came first
+-            Peer peer = gameSession.getPeers().get((int) remotePlayerId);
+-            if (peer != null) {//This is highly unlikely, peer is present if connectToPeer was called first
+-                try {
+-                    peer.getIce().onIceMessageReceived(objectMapper.readValue((String) msg, CandidatesMessage.class));
+-                    err = false;
+-                } catch (IOException e) {
+-                    log.error("Failed to parse iceMsg {}", msg, e);
+-                    return;
+-                }
+-            }
+-        }
++        // GameSession gameSession = IceAdapter.gameSession;
++        // if (gameSession != null) {//This is highly unlikely, game session got created if JoinGame/HostGame came first
++        //     Peer peer = gameSession.getPeers().get((int) remotePlayerId);
++        //     if (peer != null) {//This is highly unlikely, peer is present if connectToPeer was called first
++        //         try {
++        //             peer.getIce().onIceMessageReceived(objectMapper.readValue((String) msg, CandidatesMessage.class));
++        //             err = false;
++        //         } catch (IOException e) {
++        //             log.error("Failed to parse iceMsg {}", msg, e);
++        //             return;
++        //         }
++        //     }
++        // }
+ 
+         if (err) {
+             log.error("ICE MESSAGE IGNORED for id: {}", remotePlayerId);
+@@ -99,28 +99,28 @@ public class RPCHandler {
+ 
+         List<IceStatus.IceRelay> relays = new ArrayList<>();
+         GameSession gameSession = IceAdapter.gameSession;
+-        if (gameSession != null) {
+-            synchronized (gameSession.getPeers()) {
+-                gameSession.getPeers().values().stream()
+-                        .map(peer -> {
+-                            IceStatus.IceRelay.IceRelayICEState iceRelayICEState = new IceStatus.IceRelay.IceRelayICEState(
+-                                    peer.isLocalOffer(),
+-                                    peer.getIce().getIceState().getMessage(),
+-                                    "",
+-                                    "",
+-                                    peer.getIce().isConnected(),
+-                                    Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getLocalCandidate).map(Candidate::getHostAddress).map(TransportAddress::toString).orElse(""),
+-                                    Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getRemoteCandidate).map(Candidate::getHostAddress).map(TransportAddress::toString).orElse(""),
+-                                    Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getLocalCandidate).map(Candidate::getType).map(CandidateType::toString).orElse(""),
+-                                    Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getRemoteCandidate).map(Candidate::getType).map(CandidateType::toString).orElse(""),
+-                                    -1.0
+-                            );
+-
+-                            return new IceStatus.IceRelay(peer.getRemoteId(), peer.getRemoteLogin(), peer.getFaSocket().getLocalPort(), iceRelayICEState);
+-                        })
+-                        .forEach(relays::add);
+-            }
+-        }
++        // if (gameSession != null) {
++        //     synchronized (gameSession.getPeers()) {
++        //         gameSession.getPeers().values().stream()
++        //                 .map(peer -> {
++        //                     IceStatus.IceRelay.IceRelayICEState iceRelayICEState = new IceStatus.IceRelay.IceRelayICEState(
++        //                             peer.isLocalOffer(),
++        //                             peer.getIce().getIceState().getMessage(),
++        //                             "",
++        //                             "",
++        //                             peer.getIce().isConnected(),
++        //                             Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getLocalCandidate).map(Candidate::getHostAddress).map(TransportAddress::toString).orElse(""),
++        //                             Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getRemoteCandidate).map(Candidate::getHostAddress).map(TransportAddress::toString).orElse(""),
++        //                             Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getLocalCandidate).map(Candidate::getType).map(CandidateType::toString).orElse(""),
++        //                             Optional.ofNullable(peer.getIce().getComponent()).map(Component::getSelectedPair).map(CandidatePair::getRemoteCandidate).map(Candidate::getType).map(CandidateType::toString).orElse(""),
++        //                             -1.0
++        //                     );
++
++        //                     return new IceStatus.IceRelay(peer.getRemoteId(), peer.getRemoteLogin(), peer.getFaSocket().getLocalPort(), iceRelayICEState);
++        //                 })
++        //                 .forEach(relays::add);
++        //     }
++        // }
+ 
+         IceStatus status = new IceStatus(
+                 IceAdapter.VERSION,
+-- 
+2.46.0.windows.1
+
