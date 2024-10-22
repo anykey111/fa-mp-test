@@ -10,10 +10,16 @@ endif
 $(GPGNET): gpgnet-mock.c mongoose.c
 	gcc $^ $(CFLAGS) $(CFLAGS_MONGOOSE) -o $(GPGNET)
 
+proxy-test.exe: main.c mongoose.c
+	gcc $^ $(CFLAGS) $(CFLAGS_MONGOOSE) -o $@
+
 .PHONY: all test
 
-all: $(GPGNET)
+all: $(GPGNET) proxy-test.exe
 	$(GPGNET)
 
 test: $(GPGNET)
 	$(GPGNET) --record log.csv
+
+test-proxy: proxy-test.exe
+	proxy-test.exe

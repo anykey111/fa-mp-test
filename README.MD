@@ -31,8 +31,8 @@ add lines
     ConExecute('net_DebugLevel 5')
     ConExecute('net_CompressionMethod 0')
     ConExecute('net_SendDelay 25')
-    ConExecute('net_AckDelay 25')
-    ConExecute('net_MaxBacklog 64000')
+    ConExecute('net_AckDelay 0')
+    ConExecute('net_MaxBacklog 8000')
     ConExecute('net_MaxSendRate 64000')
 
 # .csv log
