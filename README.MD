@@ -90,6 +90,11 @@ Messages that games send even when all players are idle, probably related to sim
 
 # Proxy server
 
-    make proxy
+    # linux 
+    make all
     # run server on 7788 port
     ./proxy
+
+    # windows
+    mingw32-make all
+    ./proxy.exe
