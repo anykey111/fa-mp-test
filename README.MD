@@ -88,3 +88,8 @@ Messages that games send even when all players are idle, probably related to sim
     >.output p1p2.csv
     >select * from fa where src = 6001 and dst = 6002 or src = 6002 and dst == 6001;
 
+# Proxy server
+
+    make proxy
+    # run server on 7788 port
+    ./proxy
