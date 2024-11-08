@@ -163,8 +163,8 @@ log_packet(u16 from, u16 to, struct MPHeader *h)
     static uint64_t s_start_time = 0;
     if (!s_start_time)
         s_start_time = mg_millis();
-    fprintf(s_log, "%u\t%u\t%u\t%s\t%u\t%u\t%u\t%u\tx'%s'\n",
-        (u32)(mg_millis() - s_start_time), from, to, mp_name, h->ser, h->irt, h->seq, h->expected, hex);
+    fprintf(s_log, "%u\t%u\t%u\t%s\t%u\t%u\t%u\t%u\t%u\tx'%s'\n",
+        (u32)(mg_millis() - s_start_time), from, to, mp_name, h->mask, h->ser, h->irt, h->seq, h->expected, hex);
     const u8 *ptr = h->data;
     const u8 *end = h->data + h->len;
     bool enable_comments = false;
@@ -474,7 +474,7 @@ main(int argc, char *argv[])
                 exit(EXIT_FAILURE);
             }
             MG_INFO(("start recording to %s", filename));
-            fprintf(s_log, "ts\tsrc\tdst\ttype\tser\tirt\tseq\texpected\tdata\n");
+            fprintf(s_log, "ts\tsrc\tdst\ttype\tmask\tser\tirt\tseq\texpected\tdata\n");
         } else {
             usage(argv[0]);
         }
