@@ -28,12 +28,8 @@ remove ConExecute function hook
 
 add lines
     
-    ConExecute('net_DebugLevel 5')
-    ConExecute('net_CompressionMethod 0')
-    ConExecute('net_SendDelay 25')
-    ConExecute('net_AckDelay 0')
-    ConExecute('net_MaxBacklog 8000')
-    ConExecute('net_MaxSendRate 64000')
+    ConExecute('net_DebugLevel 3') -- enable debug log
+    ConExecute('net_CompressionMethod 0') -- disable compression
 
 # .csv log
 
@@ -70,6 +66,16 @@ Data field contains byte stream, that later broken down into individual messages
         u16 len;  // total message length, including the `type`
         u8  data[len - 1]; // message data
     }
+
+By default message stream compressed using zlib.
+
+    // ForgedAlliance.exe zlib parameters 
+    deflateInit2(ctx, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -14 /*windowBits */, 8 /* memLevel */, Z_DEFAULT_STRATEGY)
+
+    # message stream decompression, python example
+    import zlib
+    z = zlib.decompressobj(wbits=-14)
+    z.decompress(bytearray.fromhex("4ae16728c849ac4c2d32626062606000000000ffff"))
 
 Messages that games send even when all players are idle, probably related to simtick.
 
